@@ -1,6 +1,6 @@
 {
   "root": true,
-  "ignorePatterns": ["projects/**/*"],
+  "ignorePatterns": ["projects/**/*", "src/index.html"],
   "extends": ["plugin:prettier/recommended"],
   "plugins": ["prettier"],
   "rules": {
