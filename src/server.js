@@ -27,6 +27,10 @@ const SECURITY_HEADERS = {
   'Cross-Origin-Resource-Policy': 'same-origin',
 };
 
+// SOLO PARA LA PRÁCTICA: permite medir la calificación "antes" en securityheaders.com.
+// Con DISABLE_SECURITY_HEADERS=true no se envían las cabeceras. En producción debe estar sin definir.
+const ACTIVE_HEADERS = process.env.DISABLE_SECURITY_HEADERS === 'true' ? {} : SECURITY_HEADERS;
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -47,7 +51,7 @@ const COMPRESSIBLE = new Set(['.html', '.js', '.css', '.json', '.txt', '.svg']);
 const HASHED = /\.[0-9a-f]{16}\.(js|css|png|ttf|woff2?)$/;
 
 function send(res, status, headers, body) {
-  res.writeHead(status, { ...SECURITY_HEADERS, ...headers });
+  res.writeHead(status, { ...ACTIVE_HEADERS, ...headers });
   res.end(body);
 }
 
@@ -108,7 +112,7 @@ const server = http.createServer((req, res) => {
   } else {
     headers['Content-Length'] = stat.size;
   }
-  res.writeHead(200, { ...SECURITY_HEADERS, ...headers });
+  res.writeHead(200, { ...ACTIVE_HEADERS, ...headers });
   if (req.method === 'HEAD') return res.end();
   const stream = fs.createReadStream(file);
   stream.on('error', () => res.destroy());
