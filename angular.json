@@ -30,7 +30,7 @@
               "src/favicon.ico",
               "src/og-image.jpg",
               "src/assets",
-              "src/staticwebapp.config.json"
+              "src/server.js"
             ],
             "styles": ["src/styles.scss"],
             "stylePreprocessorOptions": {
