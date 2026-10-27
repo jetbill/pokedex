@@ -28,7 +28,7 @@
     "@fortawesome/fontawesome-svg-core": "^6.1.2",
     "@fortawesome/free-brands-svg-icons": "^6.1.2",
     "@fortawesome/free-solid-svg-icons": "^6.1.2",
-    "@graphql-tools/webpack-loader": "^6.7.1",
+    "@graphql-tools/webpack-loader": "^8.0.1",
     "apollo-angular": "^3.0.1",
     "graphql": "^16",
     "normalize.css": "^8.0.1",
