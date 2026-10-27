@@ -1,0 +1,203 @@
+# Pipeline CI/CD de PokeDex en Azure Pipelines (repositorio en GitHub).
+#
+# Flujo:
+#   PR a master        -> Build (lint, pruebas, build) + Seguridad. No despliega.
+#   push a develop     -> Build + Seguridad + despliegue a DEV    + pruebas posteriores.
+#   push a master      -> Build + Seguridad + despliegue a STAGING + pruebas posteriores (incl. ZAP)
+#                         -> aprobación manual del ambiente "production" -> despliegue a PROD + pruebas.
+#
+# Sin secretos en el repositorio: el despliegue usa conexiones de servicio de Azure con
+# federación de identidades de carga de trabajo (OIDC). No hay contraseñas ni claves guardadas.
+
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  branches:
+    include:
+      - master
+      - develop
+
+pr:
+  branches:
+    include:
+      - master
+
+pool:
+  vmImage: ubuntu-24.04
+
+variables:
+  nodeVersion: '18.x'
+  npm_config_cache: $(Pipeline.Workspace)/.npm
+  gitleaksVersion: '8.18.4'
+  semgrepVersion: '1.182.1'
+
+stages:
+  # ---------------------------------------------------------------------------
+  - stage: Build
+    displayName: 'CI: dependencias, lint, pruebas y build'
+    jobs:
+      - job: Build
+        displayName: 'Build y pruebas'
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: NodeTool@0
+            displayName: 'Instalar Node $(nodeVersion)'
+            inputs:
+              versionSpec: $(nodeVersion)
+
+          - task: Cache@2
+            displayName: 'Cache de npm'
+            inputs:
+              key: 'npm | "$(Agent.OS)" | package-lock.json'
+              restoreKeys: |
+                npm | "$(Agent.OS)"
+              path: $(npm_config_cache)
+
+          - script: npm ci
+            displayName: 'Instalar dependencias (npm ci)'
+
+          - script: npm run lint
+            displayName: 'Lint'
+
+          - script: |
+              export CHROME_BIN="$(command -v google-chrome)"
+              npm run test:cov
+            displayName: 'Pruebas unitarias con cobertura (Chrome headless)'
+
+          - script: npx ng build --configuration production
+            displayName: 'Build de producción'
+
+          - script: |
+              set -e
+              test -f dist/pokedex-angular/index.html
+              test -f dist/pokedex-angular/server.js
+              mkdir -p "$(Build.ArtifactStagingDirectory)"
+              cd dist/pokedex-angular
+              zip -qr "$(Build.ArtifactStagingDirectory)/app.zip" .
+            displayName: 'Empaquetar app.zip'
+
+          - publish: $(Build.ArtifactStagingDirectory)/app.zip
+            artifact: drop
+            displayName: 'Publicar artefacto de despliegue'
+
+          - publish: coverage/pokedex-angular
+            artifact: coverage
+            displayName: 'Publicar cobertura'
+            condition: succeededOrFailed()
+            continueOnError: true
+
+  # ---------------------------------------------------------------------------
+  - stage: Security
+    displayName: 'Seguridad previa al despliegue'
+    dependsOn: []
+    jobs:
+      - job: DependencyAudit
+        displayName: 'Dependencias (npm audit)'
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - task: NodeTool@0
+            displayName: 'Instalar Node $(nodeVersion)'
+            inputs:
+              versionSpec: $(nodeVersion)
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)"
+              npm audit --omit=dev --json > "$(Build.ArtifactStagingDirectory)/npm-audit.json" || true
+              npm audit --omit=dev || true
+            displayName: 'Informe de npm audit (dependencias de producción)'
+          - script: npm audit --omit=dev --audit-level=critical
+            displayName: 'Puerta: fallar si hay vulnerabilidades CRÍTICAS en producción'
+          - publish: $(Build.ArtifactStagingDirectory)/npm-audit.json
+            artifact: npm-audit
+            displayName: 'Publicar informe de npm audit'
+            condition: succeededOrFailed()
+            continueOnError: true
+
+      - job: SecretScan
+        displayName: 'Escaneo de secretos (gitleaks)'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          - script: |
+              set -euo pipefail
+              V="$(gitleaksVersion)"
+              cd "$(Agent.TempDirectory)"
+              curl -sSfL -O "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+              curl -sSfL -O "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_checksums.txt"
+              sha256sum --ignore-missing -c "gitleaks_${V}_checksums.txt"
+              tar xzf "gitleaks_${V}_linux_x64.tar.gz" gitleaks
+              mkdir -p "$(Build.ArtifactStagingDirectory)"
+              ./gitleaks detect --source "$(Build.SourcesDirectory)" --redact --no-banner --exit-code 1 \
+                --report-format sarif --report-path "$(Build.ArtifactStagingDirectory)/gitleaks.sarif"
+            displayName: 'gitleaks: historial completo del repositorio'
+          - publish: $(Build.ArtifactStagingDirectory)/gitleaks.sarif
+            artifact: gitleaks
+            displayName: 'Publicar informe de gitleaks'
+            condition: succeededOrFailed()
+            continueOnError: true
+
+      - job: SAST
+        displayName: 'Análisis estático (Semgrep)'
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - task: UsePythonVersion@0
+            displayName: 'Instalar Python'
+            inputs:
+              versionSpec: '3.12'
+          - script: python -m pip install --quiet "semgrep==$(semgrepVersion)"
+            displayName: 'Instalar Semgrep'
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)"
+              semgrep scan --config p/javascript --config p/typescript --metrics=off --error \
+                --exclude '*.spec.ts' --sarif --output "$(Build.ArtifactStagingDirectory)/semgrep.sarif" src
+            displayName: 'Semgrep (reglas JavaScript y TypeScript)'
+          - publish: $(Build.ArtifactStagingDirectory)/semgrep.sarif
+            artifact: semgrep
+            displayName: 'Publicar informe de Semgrep'
+            condition: succeededOrFailed()
+            continueOnError: true
+
+  # ---------------------------------------------------------------------------
+  - stage: DeployDev
+    displayName: 'Despliegue a DEV (rama develop)'
+    dependsOn: [Build, Security]
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - template: azure-pipelines/templates/deploy-env.yml
+        parameters:
+          environment: dev
+          serviceConnection: sc-azure-pokedex-dev
+          resourceGroup: rg-pokedex-mexico-dev
+          appName: app-pokedex-monterrey-dev
+          runZap: false
+
+  # ---------------------------------------------------------------------------
+  - stage: DeployStaging
+    displayName: 'Despliegue a STAGING (rama master)'
+    dependsOn: [Build, Security]
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - template: azure-pipelines/templates/deploy-env.yml
+        parameters:
+          environment: staging
+          serviceConnection: sc-azure-pokedex-stg
+          resourceGroup: rg-pokedex-mexico-stg
+          appName: app-pokedex-monterrey-stg
+          runZap: true
+
+  # ---------------------------------------------------------------------------
+  - stage: DeployProd
+    displayName: 'Despliegue a PRODUCCIÓN (aprobación manual)'
+    dependsOn: DeployStaging
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - template: azure-pipelines/templates/deploy-env.yml
+        parameters:
+          environment: production
+          serviceConnection: sc-azure-pokedex
+          resourceGroup: rg-pokedex-mexico-prod
+          appName: app-pokedex-monterrey-prod
+          runZap: true

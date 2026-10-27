@@ -1,0 +1,72 @@
+# Plantilla: despliega el artefacto "drop" en un ambiente y ejecuta las pruebas posteriores.
+parameters:
+  - name: environment        # Ambiente de Azure DevOps (dev | staging | production)
+    type: string
+  - name: serviceConnection  # Conexión de servicio de Azure (OIDC)
+    type: string
+  - name: resourceGroup
+    type: string
+  - name: appName
+    type: string
+  - name: runZap             # Ejecutar OWASP ZAP baseline contra la URL desplegada
+    type: boolean
+    default: false
+
+jobs:
+  - deployment: Deploy
+    displayName: 'Desplegar en ${{ parameters.environment }}'
+    environment: ${{ parameters.environment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - download: current
+              artifact: drop
+              displayName: 'Descargar artefacto'
+
+            - task: AzureCLI@2
+              displayName: 'az webapp deploy (zip) -> ${{ parameters.appName }}'
+              inputs:
+                azureSubscription: ${{ parameters.serviceConnection }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  set -euo pipefail
+                  az webapp deploy \
+                    --resource-group "${{ parameters.resourceGroup }}" \
+                    --name "${{ parameters.appName }}" \
+                    --src-path "$(Pipeline.Workspace)/drop/app.zip" \
+                    --type zip
+
+  - job: PostDeploy
+    displayName: 'Pruebas posteriores (${{ parameters.environment }})'
+    dependsOn: Deploy
+    steps:
+      - checkout: self
+        fetchDepth: 1
+
+      - bash: bash scripts/smoke-test.sh "https://${{ parameters.appName }}.azurewebsites.net"
+        displayName: 'Prueba de humo (salud y rutas)'
+
+      - bash: bash scripts/verify-headers.sh "https://${{ parameters.appName }}.azurewebsites.net/"
+        displayName: 'Verificar cabeceras de seguridad'
+
+      - ${{ if eq(parameters.runZap, true) }}:
+          - bash: |
+              set +e
+              URL="https://${{ parameters.appName }}.azurewebsites.net"
+              OUT="$(Agent.TempDirectory)/zap"
+              mkdir -p "$OUT" && chmod 777 "$OUT"
+              docker run --rm -v "$OUT:/zap/wrk/:rw" ghcr.io/zaproxy/zaproxy:stable \
+                zap-baseline.py -t "$URL" -r zap-report.html -J zap-report.json -w zap-report.md -m 5
+              rc=$?
+              echo "zap-baseline terminó con código $rc (0=sin alertas, 1=fallos, 2=advertencias, 3=error)"
+              if [ "$rc" = "0" ] || [ "$rc" = "2" ]; then exit 0; fi
+              exit 1
+            displayName: 'OWASP ZAP baseline scan'
+
+          - publish: $(Agent.TempDirectory)/zap
+            artifact: zap-report-${{ parameters.environment }}
+            displayName: 'Publicar informe de ZAP'
+            condition: succeededOrFailed()
+            continueOnError: true

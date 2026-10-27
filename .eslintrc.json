@@ -1,12 +1,23 @@
 {
   "root": true,
-  "ignorePatterns": ["projects/**/*"],
+  "ignorePatterns": ["projects/**/*", "src/index.html"],
   "extends": ["plugin:prettier/recommended"],
   "plugins": ["prettier"],
   "rules": {
     "prettier/prettier": "error"
   },
   "overrides": [
+    {
+      "files": ["src/server.js"],
+      "env": {
+        "node": true,
+        "es2020": true
+      },
+      "parserOptions": {
+        "ecmaVersion": 2020,
+        "sourceType": "script"
+      }
+    },
     {
       "files": ["*.ts"],
       "parserOptions": {
