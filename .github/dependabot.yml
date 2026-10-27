@@ -1,0 +1,20 @@
+# Dependabot: alertas y PR de actualización de dependencias npm.
+# Las versiones mayores de Angular se ignoran: la app es Angular 14 (legada) y saltar de
+# versión mayor es una migración planificada, no una actualización automática.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: '@angular/*'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@angular-devkit/*'
+        update-types: ['version-update:semver-major']
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major', 'version-update:semver-minor']
+    groups:
+      npm-minor-and-patch:
+        update-types: ['minor', 'patch']
